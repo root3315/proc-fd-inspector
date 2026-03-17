@@ -7,6 +7,7 @@ and other resources a process has open.
 """
 
 import argparse
+import json
 import os
 import stat
 import sys
@@ -155,22 +156,32 @@ def format_fd_table(fds, show_all=False):
     """Format file descriptors as a table string."""
     if not fds:
         return "  No file descriptors found"
-    
+
     lines = []
     lines.append("  FD   TYPE         TARGET")
     lines.append("  " + "-" * 60)
-    
+
     for fd in fds:
         fd_num = fd["fd"]
         fd_type = fd["type"]
         target = fd["target"]
-        
+
         if len(target) > 50 and not show_all:
             target = target[:47] + "..."
-        
+
         lines.append(f"  {fd_num:<6} {fd_type:<12} {target}")
-    
+
     return "\n".join(lines)
+
+
+def format_output_json(data, output_type):
+    """Format output as JSON string."""
+    output = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "type": output_type,
+        "data": data
+    }
+    return json.dumps(output, indent=2)
 
 
 def list_processes(search_term=None, user_filter=None):
@@ -201,46 +212,69 @@ def list_processes(search_term=None, user_filter=None):
     return processes
 
 
-def print_process_list(search_term=None, user_filter=None):
+def print_process_list(search_term=None, user_filter=None, json_output=False):
     """Print a formatted list of processes."""
     procs = list_processes(search_term, user_filter)
-    
+
     if not procs:
-        print("No matching processes found.")
+        if json_output:
+            print(format_output_json([], "process_list"))
+        else:
+            print("No matching processes found.")
         return
-    
-    print(f"{'PID':<8} {'UID':<8} {'NAME':<20} COMMAND")
-    print("-" * 70)
-    
-    for proc in procs:
-        cmdline = proc["cmdline"]
-        if len(cmdline) > 50:
-            cmdline = cmdline[:47] + "..."
-        print(f"{proc['pid']:<8} {proc['uid']:<8} {proc['name']:<20} {cmdline}")
-    
-    print(f"\nTotal: {len(procs)} process(es)")
+
+    if json_output:
+        print(format_output_json(procs, "process_list"))
+    else:
+        print(f"{'PID':<8} {'UID':<8} {'NAME':<20} COMMAND")
+        print("-" * 70)
+
+        for proc in procs:
+            cmdline = proc["cmdline"]
+            if len(cmdline) > 50:
+                cmdline = cmdline[:47] + "..."
+            print(f"{proc['pid']:<8} {proc['uid']:<8} {proc['name']:<20} {cmdline}")
+
+        print(f"\nTotal: {len(procs)} process(es)")
 
 
-def print_fd_summary(pid):
+def print_fd_summary(pid, json_output=False):
     """Print a summary of file descriptor types for a process."""
     fds = inspect_pid_fds(pid)
-    
+
     if not fds:
-        print(f"PID {pid}: No file descriptors or process not accessible")
+        if json_output:
+            output_data = {
+                "pid": pid,
+                "error": "No file descriptors or process not accessible"
+            }
+            print(format_output_json(output_data, "fd_summary"))
+        else:
+            print(f"PID {pid}: No file descriptors or process not accessible")
         return
-    
+
     type_counts = defaultdict(int)
     for fd in fds:
         type_counts[fd["type"]] += 1
-    
+
     name = get_process_name(pid)
-    print(f"\nFile Descriptor Summary for {name} (PID {pid})")
-    print("=" * 50)
     
-    for fd_type, count in sorted(type_counts.items()):
-        print(f"  {fd_type:<15} {count}")
-    
-    print(f"  {'TOTAL':<15} {len(fds)}")
+    if json_output:
+        summary_data = {
+            "pid": pid,
+            "name": name,
+            "fd_counts": dict(type_counts),
+            "total": len(fds)
+        }
+        print(format_output_json(summary_data, "fd_summary"))
+    else:
+        print(f"\nFile Descriptor Summary for {name} (PID {pid})")
+        print("=" * 50)
+
+        for fd_type, count in sorted(type_counts.items()):
+            print(f"  {fd_type:<15} {count}")
+
+        print(f"  {'TOTAL':<15} {len(fds)}")
 
 
 def main():
@@ -255,82 +289,111 @@ Examples:
   %(prog)s -p 1234 -t socket           Show only socket FDs
   %(prog)s -p 1234 --summary           Show FD type summary
   %(prog)s -p 1234 -a                  Show full paths (no truncation)
+  %(prog)s -p 1234 --json              Output in JSON format
 """
     )
-    
+
     parser.add_argument(
         "-l", "--list",
         action="store_true",
         help="List all running processes"
     )
-    
+
     parser.add_argument(
         "-p", "--pid",
         type=int,
         help="Inspect file descriptors for specific PID"
     )
-    
+
     parser.add_argument(
         "-s", "--search",
         type=str,
         help="Search term to filter process names"
     )
-    
+
     parser.add_argument(
         "-u", "--user",
         type=str,
         help="Filter by UID"
     )
-    
+
     parser.add_argument(
         "-t", "--type",
         choices=["file", "socket", "pipe", "device", "anon_inode", "other"],
         help="Filter FDs by type"
     )
-    
+
     parser.add_argument(
         "--summary",
         action="store_true",
         help="Show summary of FD types instead of full list"
     )
-    
+
     parser.add_argument(
         "-a", "--all",
         action="store_true",
         help="Show full paths without truncation"
     )
-    
+
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format"
+    )
+
     args = parser.parse_args()
-    
+
     if args.list:
-        print_process_list(args.search, args.user)
+        print_process_list(args.search, args.user, json_output=args.json)
         return 0
-    
+
     if args.pid:
         pid = args.pid
-        
+
         try:
             name = get_process_name(pid)
             cmdline = get_process_cmdline(pid)
             uid = get_process_user(pid)
-            
+        except (PermissionError, ProcessLookupError):
+            print(f"Error: Cannot access process {pid}")
+            return 1
+
+        if args.json:
+            process_info = {
+                "pid": pid,
+                "name": name,
+                "uid": uid,
+                "cmdline": cmdline
+            }
+
+            if args.summary:
+                fds = inspect_pid_fds(pid)
+                type_counts = defaultdict(int)
+                for fd in fds:
+                    type_counts[fd["type"]] += 1
+                process_info["fd_counts"] = dict(type_counts)
+                process_info["total_fds"] = len(fds)
+                print(format_output_json(process_info, "fd_summary"))
+            else:
+                fds = inspect_pid_fds(pid, filter_type=args.type)
+                process_info["file_descriptors"] = fds
+                process_info["total_fds"] = len(fds)
+                print(format_output_json(process_info, "fd_inspection"))
+        else:
             print(f"\nProcess: {name}")
             print(f"PID: {pid}")
             print(f"UID: {uid}")
             print(f"Command: {cmdline}")
-        except (PermissionError, ProcessLookupError):
-            print(f"Error: Cannot access process {pid}")
-            return 1
-        
-        if args.summary:
-            print_fd_summary(pid)
-        else:
-            fds = inspect_pid_fds(pid, filter_type=args.type)
-            print(f"\n{format_fd_table(fds, show_all=args.all)}")
-            print(f"\nTotal FDs: {len(fds)}")
-        
+
+            if args.summary:
+                print_fd_summary(pid)
+            else:
+                fds = inspect_pid_fds(pid, filter_type=args.type)
+                print(f"\n{format_fd_table(fds, show_all=args.all)}")
+                print(f"\nTotal FDs: {len(fds)}")
+
         return 0
-    
+
     parser.print_help()
     return 0
 

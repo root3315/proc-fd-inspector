@@ -25,6 +25,10 @@ python proc_fd_inspector.py -p 1234 -t socket
 
 # Get a summary of FD types
 python proc_fd_inspector.py -p 1234 --summary
+
+# Output in JSON format
+python proc_fd_inspector.py -p 1234 --json
+python proc_fd_inspector.py -l --json
 ```
 
 ## What It Shows
